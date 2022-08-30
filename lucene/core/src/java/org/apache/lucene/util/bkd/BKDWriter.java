@@ -896,6 +896,7 @@ public class BKDWriter implements Closeable {
   */
 
   private void checkMaxLeafNodeCount(int numLeaves) {
+    // TODO 这里的校验逻辑怎么理解？
     if (config.bytesPerDim * (long) numLeaves > ArrayUtil.MAX_ARRAY_LENGTH) {
       throw new IllegalStateException(
           "too many nodes; increase config.maxPointsInLeafNode (currently "

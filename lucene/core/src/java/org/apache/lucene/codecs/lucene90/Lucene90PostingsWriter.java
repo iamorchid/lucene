@@ -36,6 +36,7 @@ import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SegmentWriteState;
+import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.ArrayUtil;
@@ -244,6 +245,15 @@ public final class Lucene90PostingsWriter extends PushPostingsWriterBase {
       if (writeFreqs) {
         pforUtil.encode(freqBuffer, docOut);
       }
+
+      // skipWriter.bufferSkip之所以不能在这里调用，因为此时
+      // position信息还没有处理（norm也没有处理）。
+      // startDoc(docID, freq);
+      // for (int i = 0; i < freq; i++) {
+      //   addPosition(...);
+      // }
+      // finishDoc();
+
       // NOTE: don't set docBufferUpto back to 0 here;
       // finishDoc will do so (because it needs to see that
       // the block was filled so it can save skip data)
@@ -465,6 +475,9 @@ public final class Lucene90PostingsWriter extends PushPostingsWriterBase {
     docCount = 0;
   }
 
+  /**
+   * Also see {@link Lucene90PostingsReader#decodeTerm}
+   */
   @Override
   public void encodeTerm(
       DataOutput out, FieldInfo fieldInfo, BlockTermState _state, boolean absolute)
@@ -486,6 +499,8 @@ public final class Lucene90PostingsWriter extends PushPostingsWriterBase {
       final long delta = (long) state.singletonDocID - lastState.singletonDocID;
       out.writeVLong((BitUtil.zigZagEncode(delta) << 1) | 0x01);
     } else {
+      // 当前term的singletonDocID不为-1时（即docFreq为1），下面的写入可以不用？因为此时
+      // state.docStartFP和lastState.docStartFP应该是一样的。
       out.writeVLong((state.docStartFP - lastState.docStartFP) << 1);
       if (state.singletonDocID != -1) {
         out.writeVInt(state.singletonDocID);

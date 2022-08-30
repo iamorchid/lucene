@@ -128,14 +128,14 @@ class PendingDeletes {
   void onNewReader(CodecReader reader, SegmentCommitInfo info) throws IOException {
     if (liveDocsInitialized == false) {
       assert writeableLiveDocs == null;
-      if (reader.hasDeletions()) {
+      if (reader.hasDeletions()) { // TODO 检查是否有文档硬删除
         // we only initialize this once either in the ctor or here
         // if we use the live docs from a reader it has to be in a situation where we don't
         // have any existing live docs
         assert pendingDeleteCount == 0 : "pendingDeleteCount: " + pendingDeleteCount;
         liveDocs = reader.getLiveDocs();
-        assert liveDocs == null
-            || assertCheckLiveDocs(liveDocs, info.info.maxDoc(), info.getDelCount());
+        assert liveDocs == null // TODO 如果liveDocs为null，则仅仅有软删除
+            || assertCheckLiveDocs(liveDocs, info.info.maxDoc(), info.getDelCount()); // TODO info.getDelCount()表示硬删除的数量
       }
       liveDocsInitialized = true;
     }

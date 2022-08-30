@@ -1049,6 +1049,8 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
       assert segIdx >= newSegIdx;
       final SegmentCommitInfo info = segments.get(segIdx);
       if (mergedAway.contains(info)) {
+        // dropSegment表示是否需要drop掉merge新生成的合并段，这个仅当合并段不包含
+        // 文档时才会被设置为true。
         if (!inserted && !dropSegment) {
           segments.set(segIdx, merge.info);
           inserted = true;
@@ -1064,7 +1066,7 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
     segments.subList(newSegIdx, segments.size()).clear();
 
     // Either we found place to insert segment, or, we did
-    // not, but only because all segments we merged becamee
+    // not, but only because all segments we merged became
     // deleted while we are merging, in which case it should
     // be the case that the new segment is also all deleted,
     // we insert it at the beginning if it should not be dropped:

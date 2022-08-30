@@ -160,6 +160,22 @@ final class ReadersAndUpdates {
         fieldUpdates = new ArrayList<>();
         mergingDVUpdates.put(update.field, fieldUpdates);
       }
+      /**
+       * 这里为何不校验fieldUpdates没有del gen重复？从{@link IndexWriter#mergeMiddle}中如下操作
+       * 来看，这个是可能的。即{@link #setIsMerging}后，如果此时{@link #addDVUpdate}被其他线程调用，
+       * 再调用{@link #getReaderForMerge}时，就会导致mergingDVUpdates中，有重复的updates。同时，
+       * 可以参见{@link IndexWriter#commitMergedDeletesAndUpdates}中如何处理发生在merge触发后的
+       * updates。
+       *
+       * TODO lucene为啥会允许mergingDVUpdates有重复的updates？
+       *
+       * merge.initMergeReaders(
+       *           sci -> {
+       *             final ReadersAndUpdates rld = getPooledInstance(sci, true);
+       *             rld.setIsMerging();
+       *             return rld.getReaderForMerge(context);
+       *           });
+       */
       fieldUpdates.add(update);
     }
   }
@@ -324,6 +340,7 @@ final class ReadersAndUpdates {
       final IOContext updatesContext = new IOContext(new FlushInfo(info.info.maxDoc(), bytes));
       final FieldInfo fieldInfo = infos.fieldInfo(field);
       assert fieldInfo != null;
+      // 这里可以看到，如果DV发生变化，对应的字段信息也会更新（即更新DV gen）
       fieldInfo.setDocValuesGen(nextDocValuesGen);
       final FieldInfos fieldInfos = new FieldInfos(new FieldInfo[] {fieldInfo});
       // separately also track which files were created for this gen
@@ -527,7 +544,6 @@ final class ReadersAndUpdates {
       return docIDOut;
     }
   }
-  ;
 
   private synchronized Set<String> writeFieldInfosGen(
       FieldInfos fieldInfos, Directory dir, FieldInfosFormat infosFormat) throws IOException {
@@ -675,6 +691,12 @@ final class ReadersAndUpdates {
 
     // if there is a reader open, reopen it to reflect the updates
     if (reader != null) {
+      /**
+       * 这个函数名称不对，进行swap后，reader不仅仅具有最新的live docs信息，还有最新的field和DV信息。
+       * Load字段最新的DV信息并不是基于{@link SegmentCommitInfo#dvUpdatesFiles} (此时这个还没有
+       * 更新，见下面更新逻辑)，而是基于{@link FieldInfo#dvGen}（这个值在上面调用handleDVUpdates中
+       * 已经更新），resolve对应的DV文件。
+       */
       swapNewReaderWithLatestLiveDocs();
     }
 
@@ -783,12 +805,17 @@ final class ReadersAndUpdates {
       mergingUpdates.addAll(ent.getValue());
     }
 
+    /**
+     * 理论上，下面的操作不是必须的，因为merge将结束的时候，也会执行{@link IndexWriter#carryOverHardDeletes}。
+     * 但是，如果现在不执行下面的操作，merge生成的segment将会包含zombie doc集合。
+     */
     SegmentReader reader = getReader(context);
     if (pendingDeletes.needsRefresh(reader)) {
       // beware of zombies:
       assert pendingDeletes.getLiveDocs() != null;
       reader = createNewReaderWithLatestLiveDocs(reader);
     }
+
     assert pendingDeletes.verifyDocCounts(reader);
     return new MergePolicy.MergeReader(reader, pendingDeletes.getHardLiveDocs());
   }

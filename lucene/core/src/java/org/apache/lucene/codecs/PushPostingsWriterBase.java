@@ -116,10 +116,8 @@ public abstract class PushPostingsWriterBase extends PostingsWriterBase {
   public final BlockTermState writeTerm(
       BytesRef term, TermsEnum termsEnum, FixedBitSet docsSeen, NormsProducer norms)
       throws IOException {
-    NumericDocValues normValues;
-    if (fieldInfo.hasNorms() == false) {
-      normValues = null;
-    } else {
+    NumericDocValues normValues = null;
+    if (fieldInfo.hasNorms()) {
       normValues = norms.getNorms(fieldInfo);
     }
     startTerm(normValues);

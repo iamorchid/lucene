@@ -19,13 +19,12 @@ package org.apache.lucene.index;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
+import org.apache.lucene.codecs.DocValuesFormat;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.BytesRef;
@@ -358,6 +357,15 @@ final class BufferedUpdatesStream implements Accountable {
 
     synchronized void finishedSegment(long delGen) {
       finishedDelGens.add(delGen);
+      /**
+       * 可以看到，缓存的多个FrozenBufferedUpdates是允许并发apply到segments。
+       *
+       * 不同delGen的updates会并发添加到{@link ReadersAndUpdates#pendingDVUpdates}中，具体逻辑参考
+       * {@link FrozenBufferedUpdates#applyDocValuesUpdates}和{@link ReadersAndUpdates#addDVUpdate}）。
+       *
+       * 在所有的updates都完成apply后，对updates进行持久化时，{@link ReadersAndUpdates#handleDVUpdates}
+       * 会对pending updates按照delGen进行排序(参考{@link DocValuesFieldUpdates#mergedIterator})。
+       */
       while (true) {
         if (finishedDelGens.contains(completedDelGen + 1)) {
           finishedDelGens.remove(completedDelGen + 1);

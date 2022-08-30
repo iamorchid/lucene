@@ -57,6 +57,7 @@ final class PendingSoftDeletes extends PendingDeletes {
         mutableBits.clear(docID);
         assert hardDeletes.delete(docID) == false;
       } else {
+        // TODO 说明之前这个doc仅仅被软删除了
         // if it was deleted subtract the delCount
         pendingDeleteCount--;
         assert assertPendingDeletes();

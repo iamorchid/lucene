@@ -2833,7 +2833,13 @@ public class IndexWriter
       newSegment.setBufferedDeletesGen(nextGen);
       segmentInfos.add(newSegment);
       published = true;
+
+      /**
+       * 这里的checkpoint的操作是针对segmentInfos变更（即新加segment），而frozen updates
+       * 的apply引起的变更，则要等到{@link IndexWriter#finishApply}再调用checkpoint().
+       */
       checkpoint();
+
       if (packet != null && packet.any() && sortMap != null) {
         // TODO: not great we do this heavyish op while holding IW's monitor lock,
         // but it only applies if you are using sorted indices and updating doc values:
@@ -4036,6 +4042,9 @@ public class IndexWriter
         infoStream.message("IW", "commit: enter lock");
       }
 
+      /**
+       * 如果pendingCommit不为null，说明用户显式调用了{@link IndexWriter#prepareCommit()}
+       */
       if (pendingCommit == null) {
         if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "commit: now prepare");
@@ -4181,7 +4190,6 @@ public class IndexWriter
     testPoint("startDoFlush");
     boolean success = false;
     try {
-
       if (infoStream.isEnabled("IW")) {
         infoStream.message("IW", "  start flush: applyAllDeletes=" + applyAllDeletes);
         infoStream.message("IW", "  index before flush " + segString());
@@ -4191,34 +4199,56 @@ public class IndexWriter
       synchronized (fullFlushLock) {
         boolean flushSuccess = false;
         try {
-          long seqNo = docWriter.flushAllThreads();
-          if (seqNo < 0) {
-            seqNo = -seqNo;
-            anyChanges = true;
-          } else {
-            anyChanges = false;
-          }
+          /**
+           * flushAllThreads主要做了：
+           * 1. 对于每个DWPT，将倒排、DV、field等信息写入文件，并准备新的segment信息（即{@link SegmentCommitInfo})
+           * 2. 生成新的FlushTicket 并放入 {@link DocumentsWriterFlushQueue#queue}
+           */
+          anyChanges = docWriter.flushAllThreads() < 0;
           if (!anyChanges) {
             // flushCount is incremented in flushAllThreads
             flushCount.incrementAndGet();
           }
+          /**
+           * publishFlushedSegments主要是处理FlushTicket，主要包括:
+           * 1. 将global updates push 到 {@link BufferedUpdatesStream}
+           * 2. 将新segment的private updates push 到 {@link BufferedUpdatesStream}
+           * 3. 将新segments加入{@link #segmentInfos}
+           */
           publishFlushedSegments(true);
           flushSuccess = true;
         } finally {
           assert Thread.holdsLock(fullFlushLock);
-          ;
           docWriter.finishFullFlush(flushSuccess);
+
+          /**
+           * 处理{@link #eventQueue}中的事件，其中一部分事件是执行{@link #publishFlushedSegments}
+           * 时产生的apply updates事件。注意，processEvents执行时可以产生新的事件，比如事件本身可能就是
+           * 执行{@link #publishFlushedSegments}，从而产生新的apply updates事件，可以参考
+           * {@link #flushNotifications}的方法onDeletesApplied。
+           */
           processEvents(false);
         }
       }
 
+      // {@link #eventQueue} 允许多个线程并发执行，这里等待所有updates处理完成。
       if (applyAllDeletes) {
+        /**
+         * 将{@link BufferedUpdatesStream}中的{@link FrozenBufferedUpdates} apply到
+         * 每个segments（每个segment会有关联的{@link ReadersAndUpdates}），即对
+         * {@link FrozenBufferedUpdates}进行resolve以获得受影响的doc集合，然后将转化后
+         * 的updates信息放到{@link ReadersAndUpdates}中。
+         */
         applyAllDeletesAndUpdates();
       }
 
       anyChanges |= maybeMerge.getAndSet(false);
 
       synchronized (this) {
+        /**
+         * 持久化{@link ReadersAndUpdates}中的updates信息，并反映到segment上（即反映到
+         * {@link SegmentCommitInfo}）。
+         */
         writeReaderPool(applyAllDeletes);
         doAfterFlush();
         success = true;
@@ -4297,6 +4327,12 @@ public class IndexWriter
 
     // Carefully merge deletes that occurred after we
     // started merging:
+    /**
+     * 新segment采用merge中所有segments的最小bufferedDeletesGen，是为了保证新segment
+     * 可见尚未apply的updates。但其实这个不是必须的，因为在merge之前，已经调用
+     * {@link BufferedUpdatesStream#waitApplyForMerge}来保证maxDelGen之前的updates
+     * 都已经完成apply。
+     */
     long minGen = Long.MAX_VALUE;
 
     // Lazy init (only when we find a delete or update to carry over):
@@ -4344,7 +4380,20 @@ public class IndexWriter
         }
 
         for (DocValuesFieldUpdates updates : ent.getValue()) {
-
+          /**
+           * 如果updates还没有完成apply，则当前merge生成的segment对该updates将仍然是可见的，
+           * 因此这里可以跳过这种updates，具体逻辑参见{@link #forceApply}。
+           *
+           * FrozenBufferedUpdates apply操作分为了以下几个阶段：
+           * 1）记录当前的mergeFinishedGen，持有IndexWriter同步锁，获取当前index中的segments，然后释放同步锁
+           * 2）对步骤1）中获取的每个segment进行updates apply操作
+           * 3）再次持有IndexWriter同步锁，检查mergeFinishedGen是否变化，如果有，则继续以上操作；否则，mark updates完成
+           *
+           * 下面这种情况仅可能发生在步骤3）之前（因为当前方法持有了IndexWriter同步锁），如果updates apply
+           * 还没有进行步骤1），则进行步骤1）时一定能看到当前merge产生的segment；否则，进行到步骤3）时，会发现
+           * apply过程中有merge发生，则会再次执行updates apply（再次apply也一定能看到merge产生的segment）。
+           * 因此，下面的情况可以直接跳过。
+           */
           if (bufferedUpdatesStream.stillRunning(updates.delGen)) {
             continue;
           }
@@ -4353,6 +4402,10 @@ public class IndexWriter
           assert field.equals(updates.field);
 
           DocValuesFieldUpdates mappedUpdates = mappedField.get(updates.delGen);
+
+          /**
+           * 这里的逻辑很奇怪，对一个segment的某个field来说，会存在多个delGen相同的updates？
+           */
           if (mappedUpdates == null) {
             switch (updates.type) {
               case NUMERIC:
@@ -6057,6 +6110,10 @@ public class IndexWriter
 
       assert updates.any();
 
+      /**
+       * updates apply过程可能会经过多次iteration（中间发生merge时），seenSegments确保
+       * 同一个segment不会apply同一个updates多次。
+       */
       Set<SegmentCommitInfo> seenSegments = new HashSet<>();
 
       int iter = 0;
@@ -6071,6 +6128,12 @@ public class IndexWriter
       // while we were running.  If so, we must retry
       // resolving against the newly merged segment(s).  Eventually no merge finishes while we were
       // running and we are done.
+      /**
+       * FrozenBufferedUpdates apply操作分为了以下几个阶段：
+       * 1）记录当前的mergeFinishedGen，持有IndexWriter同步锁，获取当前index中的segments，然后释放同步锁
+       * 2）对步骤1）中获取的每个segment进行updates apply操作
+       * 3）再次持有IndexWriter同步锁，检查mergeFinishedGen是否变化，如果有，则继续以上操作；否则，mark updates完成
+       */
       while (true) {
         String messagePrefix;
         if (iter == 0) {
@@ -6086,6 +6149,9 @@ public class IndexWriter
         Set<String> delFiles = new HashSet<>();
         BufferedUpdatesStream.SegmentState[] segStates;
 
+        /**
+         * segment merge相关的操作说明参考{@link #commitMergedDeletesAndUpdates}。
+         */
         synchronized (this) {
           List<SegmentCommitInfo> infos = getInfosToApply(updates);
           if (infos == null) {

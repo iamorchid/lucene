@@ -248,7 +248,7 @@ final class FrozenBufferedUpdates {
     // */
     final List<DocValuesFieldUpdates> resolvedUpdates = new ArrayList<>();
     for (Map.Entry<String, FieldUpdatesBuffer> fieldUpdate : updates.entrySet()) {
-      String updateField = fieldUpdate.getKey();
+      String updateField = fieldUpdate.getKey(); // TODO 这是要更新的DV column的名称
       DocValuesFieldUpdates dvUpdates = null;
       FieldUpdatesBuffer value = fieldUpdate.getValue();
       boolean isNumeric = value.isNumeric();
@@ -257,6 +257,13 @@ final class FrozenBufferedUpdates {
       TermDocsIterator termDocsIterator =
           new TermDocsIterator(segState.reader, iterator.isSortedTerms());
       while ((bufferedUpdate = iterator.next()) != null) {
+        /**
+         * 下面注释说的情况，属于这种：
+         * indexWriter.updateBinaryDocValue(new Term("label#1", "v1"), "dvCol", new BytesRef("v1"));
+         * indexWriter.updateBinaryDocValue(new Term("label#1", "v2"), "dvCol", new BytesRef("v2"));
+         * indexWriter.flush();
+         * 其中，Term("label#1", "v1") 和 Term("label#1", "v2")匹配的文档集可以有交集。
+         */
         // TODO: we traverse the terms in update order (not term order) so that we
         // apply the updates in the correct order, i.e. if two terms update the
         // same document, the last one that came in wins, irrespective of the
@@ -349,6 +356,11 @@ final class FrozenBufferedUpdates {
     // now freeze & publish:
     for (DocValuesFieldUpdates update : resolvedUpdates) {
       if (update.any()) {
+        /**
+         * 这里的逻辑很重要，在往DocValuesFieldUpdates增加doc时，整体上不是按照doc的升序进行添
+         * 加的，尽管单个Term更新的doc集合时顺序的。update.finish()是对doc集合进行稳定排序。在
+         * 方法{@link DocValuesFieldUpdates.AbstractIterator#nextDoc()}将会用到这个。
+         */
         update.finish();
         segState.rld.addDVUpdate(update);
       }

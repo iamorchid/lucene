@@ -264,6 +264,11 @@ final class ReaderPool implements Closeable {
     for (SegmentCommitInfo info : infos) {
       ReadersAndUpdates rld = get(info, false);
       if (rld != null) {
+        /**
+         * updates必须按照del gen的顺序执行，因此如果del gen存在空洞，比如1，2，3，5，6这些
+         * del gen对应的updates已经apply到rld，则不能将5，6的updates写入文件，因为del gen
+         * 为4的更新还没有apply完成；否则，后面del gen为4的updates将会覆盖5和6的更新。
+         */
         any |=
             rld.writeFieldUpdates(
                 directory, fieldNumbers, completedDelGenSupplier.getAsLong(), infoStream);

@@ -493,6 +493,7 @@ public abstract class LogMergePolicy extends MergePolicy {
         size = 1;
       }
 
+      // Math.log(size) / norm 等价于 以mergeFactor为底的对数值
       final SegmentInfoAndLevel infoLevel =
           new SegmentInfoAndLevel(info, (float) Math.log(size) / norm);
       levels.add(infoLevel);

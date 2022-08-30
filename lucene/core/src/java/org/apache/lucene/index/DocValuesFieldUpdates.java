@@ -155,6 +155,11 @@ abstract class DocValuesFieldUpdates implements Accountable {
    * Merge-sorts multiple iterators, one per delGen, favoring the largest delGen that has updates
    * for a given docID.
    */
+  /**
+   * TODO 这里的逻辑实现的精妙绝伦，值得好好学习。
+   * 对应某个DV字段，可以多次采用不同的Term来匹配不同的doc进行DV的更新（当然多个Term匹配的doc可以有交集）。
+   * 而每个Term匹配的doc集合，其实就是对应参数中的一个Iterator.
+   */
   public static Iterator mergedIterator(Iterator[] subs) {
 
     if (subs.length == 1) {
@@ -244,7 +249,7 @@ abstract class DocValuesFieldUpdates implements Accountable {
 
   final String field;
   final DocValuesType type;
-  final long delGen;
+  final long delGen; // TODO 更合理的叫法应该是updateGen
   private final int bitsPerValue;
   private boolean finished;
   protected final int maxDoc;
@@ -321,6 +326,7 @@ abstract class DocValuesFieldUpdates implements Accountable {
           // stable and preserving original order so the last update to that docID wins
           int cmp = Long.compare(docs.get(i) >>> 1, docs.get(j) >>> 1);
           if (cmp == 0) {
+            // TODO 保证稳定排序
             cmp = (int) (ords.get(i) - ords.get(j));
           }
           return cmp;
@@ -443,6 +449,9 @@ abstract class DocValuesFieldUpdates implements Accountable {
       ++idx;
       for (; idx < size; idx++) {
         // scan forward to last update to this doc
+        /**
+         * TODO {@link DocValuesFieldUpdates#finish()}保证了按照doc稳定排序
+         */
         final long nextLongDoc = docs.get(idx);
         if ((longDoc >>> 1) != (nextLongDoc >>> 1)) {
           break;

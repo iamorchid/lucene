@@ -156,12 +156,21 @@ final class DocumentsWriterPerThreadPool implements Iterable<DocumentsWriterPerT
     List<DocumentsWriterPerThread> list = new ArrayList<>();
     for (DocumentsWriterPerThread perThread : this) {
       if (predicate.test(perThread)) {
+        /**
+         * 如果当前dwpt正在被其他线程使用（在dwpt pool的dwpts中，但不在freeList中），则这里将会阻塞。
+         * 阻塞时，其他线程处理该dwpt将有3种情况：
+         * 1) 没有触发flush，使用线程通过marksAsFreeAndUnlock将perThread归还（即放入dwpt pool中的freeList）
+         * 2) 触发了flush，但使用线程发现full flush已经开始，这是会将改dwpt放入blockedFlushes（参见{@link DocumentsWriterFlushControl#checkout}）
+         * 3) 触发了flush，但full flush还未开始，则将改dwpt放入flushingWriters并从dwpt pool摘除，然后进行flush操作。
+         */
         perThread.lock();
         if (isRegistered(perThread)) {
+          // 对应情况1)和2)
           list.add(perThread);
         } else {
           // somebody else has taken this DWPT out of the pool.
           // unlock and let it go
+          // 对应情况 3)
           perThread.unlock();
         }
       }

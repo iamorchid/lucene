@@ -332,6 +332,7 @@ final class DocumentsWriterPerThread implements Accountable {
       // apply all deletes before we flush and release the delete slice
       deleteSlice.apply(pendingUpdates, numDocsInRAM);
       assert deleteSlice.isEmpty();
+      // 多余操作，apply会自己做reset
       deleteSlice.reset();
     }
     return globalUpdates;
@@ -384,14 +385,26 @@ final class DocumentsWriterPerThread implements Accountable {
     try {
       DocIdSetIterator softDeletedDocs;
       if (indexWriterConfig.getSoftDeletesField() != null) {
+        // flush之后，会丢弃in-memory中的引用信息，因此这里在flush之前获取相关的软删除信息。
+        // 只要文档的DV中包含软删除字段，就满足软删除，而DV的值则无关。
         softDeletedDocs = indexingChain.getHasDocValues(indexWriterConfig.getSoftDeletesField());
       } else {
         softDeletedDocs = null;
       }
+      // TODO dwpt flush核心逻辑在这里
       sortMap = indexingChain.flush(flushState);
       if (softDeletedDocs == null) {
         flushState.softDelCountOnFlush = 0;
       } else {
+        /**
+         * 对于软删除标记的文档，如果它被硬删除了，则只会统计到flushState.delCountOnFlush，而不会
+         * 统计到flushState.softDelCountOnFlush。因此，这里是将硬删除从软删除中过滤。Lucene中的
+         * 文档可以分为：
+         * 1）被硬删除
+         * 2）未被硬删除
+         *    a) 标记为软删除
+         *    b) 没有标记为软删除
+         */
         flushState.softDelCountOnFlush =
             PendingSoftDeletes.countSoftDeletes(softDeletedDocs, flushState.liveDocs);
         assert flushState.segmentInfo.maxDoc()
@@ -402,6 +415,7 @@ final class DocumentsWriterPerThread implements Accountable {
       pendingUpdates.clearDeleteTerms();
       segmentInfo.setFiles(new HashSet<>(directory.getCreatedFiles()));
 
+      // delCount和delGen会在后面调用sealFlushedSegment生成.liv文件时设置
       final SegmentCommitInfo segmentInfoPerCommit =
           new SegmentCommitInfo(
               segmentInfo,
@@ -435,6 +449,12 @@ final class DocumentsWriterPerThread implements Accountable {
         infoStream.message("DWPT", "flushed codec=" + codec);
       }
 
+      /**
+       * TODO 为什么deleteQueries和numFieldUpdates没有在indexingChain.flush处理？
+       * deleteTerms处理相对简单，直接在{@link IndexingChain#flush}时就处理了，具体可以参考
+       * {@link FreqProxTermsWriter#applyDeletes}。而对于DV更新之类的操作，则尽量缓存下来，
+       * 以便利于批量归并处理。
+       */
       final BufferedUpdates segmentDeletes;
       if (pendingUpdates.deleteQueries.isEmpty() && pendingUpdates.numFieldUpdates.get() == 0) {
         pendingUpdates.clear();
@@ -466,10 +486,12 @@ final class DocumentsWriterPerThread implements Accountable {
               infoStream,
               segmentInfoPerCommit,
               flushState.fieldInfos,
-              segmentDeletes,
+              segmentDeletes, // TODO 作为segment private updates
               flushState.liveDocs,
               flushState.delCountOnFlush,
               sortMap);
+
+      // 这里将会生成.si和.liv文件
       sealFlushedSegment(fs, sortMap, flushNotifications);
       if (infoStream.isEnabled("DWPT")) {
         infoStream.message(

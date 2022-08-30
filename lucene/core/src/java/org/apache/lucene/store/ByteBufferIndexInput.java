@@ -481,6 +481,7 @@ public abstract class ByteBufferIndexInput extends IndexInput implements RandomA
       newBuffers[0].position(offset);
       return new SingleBufferImpl(
           newResourceDescription,
+          // 这里调用slice()跳过offset之前的数据
           newBuffers[0].slice().order(ByteOrder.LITTLE_ENDIAN),
           length,
           chunkSizePower,

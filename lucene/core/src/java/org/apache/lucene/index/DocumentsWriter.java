@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.ToLongFunction;
 import org.apache.lucene.index.DocumentsWriterPerThread.FlushedSegment;
@@ -171,7 +172,7 @@ final class DocumentsWriter implements Closeable, Accountable {
     if (flushControl.isFullFlush() == false
         // never apply deletes during full flush this breaks happens before relationship
         && deleteQueue.isOpen()
-        // if it's closed then it's already fully applied and we have a new delete queue
+        // if it's closed then it's already fully applied, and we have a new delete queue
         && flushControl.getAndResetApplyAllDeletes()) {
       if (ticketQueue.addDeletes(deleteQueue)) {
         flushNotifications.onDeletesApplied(); // apply deletes event forces a purge
@@ -438,6 +439,8 @@ final class DocumentsWriter implements Closeable, Accountable {
       final boolean isUpdate = delNode != null && delNode.isDelete();
       flushingDWPT = flushControl.doAfterDocument(dwpt, isUpdate);
     } finally {
+      // 当dwpt处于flush pending状态时，flushControl.doAfterDocument会将dwpt从
+      // 从perThreadPool中摘除，此时其他线程不会在对这个dwpt进行操作。
       if (dwpt.isFlushPending() || dwpt.isAborted()) {
         dwpt.unlock();
       } else {
@@ -457,7 +460,7 @@ final class DocumentsWriter implements Closeable, Accountable {
     while (flushingDWPT != null) {
       assert flushingDWPT.hasFlushed() == false;
       hasEvents = true;
-      boolean success = false;
+      boolean success = false; // TODO 这个字段和下面的dwptSuccess重复
       DocumentsWriterFlushQueue.FlushTicket ticket = null;
       try {
         assert currentFullFlushDelQueue == null
@@ -480,7 +483,13 @@ final class DocumentsWriter implements Closeable, Accountable {
          * flush 'B' starts and freezes all deletes occurred since 'A' has
          * started. if 'B' finishes before 'A' we need to wait until 'A' is done
          * otherwise the deletes frozen by 'B' are not applied to 'A' and we
-         * might miss to deletes documents in 'A'.
+         * might miss to delete documents in 'A'.
+         */
+        /**
+         * TODO will
+         * 上面注释对应的操作，可以参考{@link DocumentsWriterFlushQueue#innerPurge}
+         * 怎么取出FlushTicket，即严格按照顺序，在前一个ticket对应的segment没有ready时，
+         * 不会处理下一个FlushTicket。
          */
         try {
           assert assertTicketQueueModification(flushingDWPT.deleteQueue);
@@ -495,11 +504,14 @@ final class DocumentsWriter implements Closeable, Accountable {
             dwptSuccess = true;
           } finally {
             subtractFlushedNumDocs(flushingDocsInRam);
+
+            // 目前仅当创建compound文件时，才会不为empty（即存在独立的文件需要清理）
             if (flushingDWPT.pendingFilesToDelete().isEmpty() == false) {
               Set<String> files = flushingDWPT.pendingFilesToDelete();
               flushNotifications.deleteUnusedFiles(files);
               hasEvents = true;
             }
+
             if (dwptSuccess == false) {
               flushNotifications.flushFailed(flushingDWPT.getSegmentInfo());
               hasEvents = true;
@@ -557,6 +569,9 @@ final class DocumentsWriter implements Closeable, Accountable {
                   flushControl.getDeleteBytesUsed() / (1024. * 1024.),
                   ramBufferSizeMB));
         }
+        // applyAllDeletes()为true时，会调用flushNotifications.onDeletesApplied()。
+        // 如果applyAllDeletes()为false，则强制调用flushNotifications.onDeletesApplied()。
+        // 这个方法本质是调度一次purge flush ticket事件。
         flushNotifications.onDeletesApplied();
       }
     }
@@ -597,7 +612,12 @@ final class DocumentsWriter implements Closeable, Accountable {
      */
     void onTragicEvent(Throwable event, String message);
 
-    /** Called once deletes have been applied either after a flush or on a deletes call */
+    /**
+     * Called once deletes have been applied either after a flush or on a deletes call。
+     * <p/>
+     * 上面注释有问题（方法名称也有问题），这时deletes/updates并没有apply，而是被frozen，
+     * 以便等待apply，即等待{@link IndexWriter#publishFlushedSegments}。
+     */
     void onDeletesApplied();
 
     /**
@@ -614,6 +634,8 @@ final class DocumentsWriter implements Closeable, Accountable {
   }
 
   void subtractFlushedNumDocs(int numFlushed) {
+    // TODO 这样不是更简单？
+    // numDocsInRAM.addAndGet(-numFlushed);
     int oldValue = numDocsInRAM.get();
     while (numDocsInRAM.compareAndSet(oldValue, oldValue - numFlushed) == false) {
       oldValue = numDocsInRAM.get();
@@ -658,7 +680,7 @@ final class DocumentsWriter implements Closeable, Accountable {
       /* Cutover to a new delete queue.  This must be synced on the flush control
        * otherwise a new DWPT could sneak into the loop with an already flushing
        * delete queue */
-      seqNo = flushControl.markForFullFlush(); // swaps this.deleteQueue synced on FlushControl
+      seqNo = flushControl.markForFullFlush(); // TODO swaps this.deleteQueue synced on FlushControl
       assert setFlushingDeleteQueue(flushingDeleteQueue);
     }
     assert currentFullFlushDelQueue != null;
@@ -671,8 +693,13 @@ final class DocumentsWriter implements Closeable, Accountable {
       while ((flushingDWPT = flushControl.nextPendingFlush()) != null) {
         anythingFlushed |= doFlush(flushingDWPT);
       }
+
       // If a concurrent flush is still in flight wait for it
+      // 这里主要是等待：
+      // 1）在full flush还没有开始时，就已经存在的dwpt flush（比如dwpt达到flush条件）
+      // 2）其他协助进行flush操作的index线程
       flushControl.waitForFlush();
+
       if (anythingFlushed == false
           && flushingDeleteQueue.anyChanges()) { // apply deletes if we did not flush any document
         if (infoStream.isEnabled("DW")) {

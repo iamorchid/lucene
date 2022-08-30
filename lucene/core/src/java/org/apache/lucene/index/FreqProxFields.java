@@ -129,6 +129,10 @@ class FreqProxFields extends Fields {
     FreqProxTermsEnum(FreqProxTermsWriterPerField terms) {
       this.terms = terms;
       this.numTerms = terms.getNumTerms();
+      /**
+       * sortedTermIDs的长度可能会比numTerms大，参见:
+       * {@link TermsHashPerField#sortTerms()}
+       */
       sortedTermIDs = terms.getSortedTermIDs();
       assert sortedTermIDs != null;
       postingsArray = (FreqProxPostingsArray) terms.postingsArray;

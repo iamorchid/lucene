@@ -156,18 +156,35 @@ final class DocumentsWriterFlushQueue {
     return ticketCount.get();
   }
 
+  /**
+   * 缓存的updates可以分为两部分：
+   * 1）global updates（见{@link DocumentsWriterDeleteQueue#globalBufferedUpdates}）
+   * 2）DWPT私有的updates（见{@link DocumentsWriterPerThread#pendingUpdates}）
+   *
+   * global updates会被apply到已存在的segments，而私有的updates则仅apply到对应的新segment。
+   * 需要注意的是，global updates的apply、新segment的publish、私有updates的apply必须按照
+   * 一定的顺序进行，即通过{@link DocumentsWriterFlushQueue#queue}。
+   *
+   * global updates（对应下面的frozenUpdates） 和 新segment+私有updates（对应下面的segment）
+   * 可以放到一个FlushTicket中，也可以分别放到不同的FlushTicket。
+   */
   static final class FlushTicket {
-    private final FrozenBufferedUpdates frozenUpdates;
+    private final FrozenBufferedUpdates frozenUpdates; // TODO 针对已存在的segments的更新
     private final boolean hasSegment;
-    private FlushedSegment segment;
+    private FlushedSegment segment; // TODO 新加的segment(可能包含私有更新)
     private boolean failed = false;
-    private boolean published = false;
+    private boolean published = false; // TODO 没有使用的字段
 
     FlushTicket(FrozenBufferedUpdates frozenUpdates, boolean hasSegment) {
       this.frozenUpdates = frozenUpdates;
       this.hasSegment = hasSegment;
     }
 
+    /**
+     * TODO will
+     * 如果hasSegment为true，但segment为null，说明当前正在flushed的segment还没有ready，
+     * 则FlushTicket处理逻辑，必须等待。参考{@link DocumentsWriter#doFlush}的注释说明。
+     */
     boolean canPublish() {
       return hasSegment == false || segment != null || failed;
     }
@@ -177,6 +194,13 @@ final class DocumentsWriterFlushQueue {
       published = true;
     }
 
+    /**
+     * TODO will
+     * 这个类设计有些问题，数据的可见性通过{@link DocumentsWriterFlushQueue}的对象锁来控制，参考：
+     * 1) {@link DocumentsWriterFlushQueue#innerPurge}如何访问canPublish()
+     * 2) {@link DocumentsWriterFlushQueue#addSegment}如何访问setSegment(segment)
+     * 3) {@link DocumentsWriterFlushQueue#markTicketFailed}如何访问setFailed()
+     */
     private void setSegment(FlushedSegment segment) {
       assert !failed;
       this.segment = segment;

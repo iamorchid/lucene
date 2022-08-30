@@ -73,6 +73,7 @@ final class FieldUpdatesBuffer {
     fields = new String[] {initialValue.term.field};
     bytesUsed.addAndGet(sizeOfString(initialValue.term.field));
     docsUpTo = new int[] {docUpTo};
+    // TODO hasValues为null时，表示所有Term都有value(这是大部分case的场景)
     if (initialValue.hasValue == false) {
       hasValues = new FixedBitSet(1);
       bytesUsed.addAndGet(hasValues.ramBytesUsed());
@@ -151,6 +152,7 @@ final class FieldUpdatesBuffer {
       docsUpTo[ord] = docUpTo;
     }
 
+    // TODO hasValues为null时，表示所有Term都有value(这是大部分case的场景)
     if (hasValue == false || hasValues != null) {
       if (hasValues == null) {
         hasValues = new FixedBitSet(ord + 1);
@@ -170,7 +172,7 @@ final class FieldUpdatesBuffer {
 
   void addUpdate(Term term, long value, int docUpTo) {
     assert isNumeric;
-    final int ord = append(term);
+    final int ord = append(term); // ord表示term是第几个加入
     String field = term.field;
     add(field, docUpTo, ord, true);
     minNumeric = Math.min(minNumeric, value);
@@ -210,6 +212,7 @@ final class FieldUpdatesBuffer {
       throw new IllegalStateException("buffer was finished already");
     }
     finished = true;
+    // TODO 对于所有的term而言，如果值不为空，且Term的field和值一样（即过滤相同的doc集合），则进行优化。
     final boolean sortedTerms = hasSingleValue() && hasValues == null && fields.length == 1;
     if (sortedTerms) {
       // sort by ascending by term, then sort descending by docsUpTo so that we can skip updates

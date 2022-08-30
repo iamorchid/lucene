@@ -42,6 +42,7 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
   private final long hardMaxBytesPerDWPT;
   private long activeBytes = 0;
   private volatile long flushBytes = 0;
+  // TODO 表示perThreadPool中，有多少个dwpt处于pending状态（注意该dwpt没有执行checkout，否则这个dwpt就不在属于perThreadPool）
   private volatile int numPending = 0;
   private int numDocsSinceStalled = 0; // only with assert
   private final AtomicBoolean flushDeletes = new AtomicBoolean(false);
@@ -56,6 +57,7 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
   // threads) to help flushing
   private final Queue<DocumentsWriterPerThread> flushQueue = new LinkedList<>();
   // only for safety reasons if a DWPT is close to the RAM limit
+  // 如果full flush触发时，某个dwpt如果达到了触发条件，将会放入到到这里。
   private final Queue<DocumentsWriterPerThread> blockedFlushes = new LinkedList<>();
   // flushingWriters holds all currently flushing writers. There might be writers in this list that
   // are also in the flushQueue which means that writers in the flushingWriters list are not
@@ -373,7 +375,7 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
   private void checkoutAndBlock(DocumentsWriterPerThread perThread) {
     assert Thread.holdsLock(this);
     assert perThreadPool.isRegistered(perThread);
-    assert perThread.isHeldByCurrentThread();
+    assert perThread.isHeldByCurrentThread(); // 重要，dwpt checkout必须持有其锁
     assert perThread.isFlushPending() : "can not block non-pending threadstate";
     assert fullFlush : "can not block if fullFlush == false";
     numPending--; // write access synced
@@ -386,7 +388,7 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
       DocumentsWriterPerThread perThread) {
     assert Thread.holdsLock(this);
     assert perThread.isFlushPending();
-    assert perThread.isHeldByCurrentThread();
+    assert perThread.isHeldByCurrentThread(); // 重要，dwpt checkout必须持有其锁
     assert perThreadPool.isRegistered(perThread);
     try {
       addFlushingDWPT(perThread);
@@ -395,6 +397,11 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
       assert checkedOut;
       return perThread;
     } finally {
+      /**
+       * TODO 这个方法其实并不影响stall state的状态，真正影响它状态的逻辑在方法
+       * {@link DocumentsWriterFlushControl#setFlushPending}中。待用方法
+       * updateStallState()应该放到setFlushPending() ???
+       */
       updateStallState();
     }
   }
@@ -419,6 +426,7 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
     boolean fullFlush;
     synchronized (this) {
       final DocumentsWriterPerThread poll;
+      // 协助full flush处理pending dwpt
       if ((poll = flushQueue.poll()) != null) {
         updateStallState();
         return poll;
@@ -428,9 +436,16 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
     }
     if (numPending > 0 && fullFlush == false) { // don't check if we are doing a full flush
       for (final DocumentsWriterPerThread next : perThreadPool) {
+        /**
+         * 大部分场景下，如果一个dwpt被一个线程设置为flush pending（{@link DocumentsWriterFlushControl#setFlushPending}），
+         * 则它也会立即被{@link DocumentsWriterFlushControl#checkOutForFlush} 或者 {@link DocumentsWriterFlushControl#checkoutAndBlock}从dwpt pool中摘除。
+         *
+         * 目前有种场景，dwpt不会被checkout，即{@link FlushByRamOrCountsPolicy#markLargestWriterPending}。
+         */
         if (next.isFlushPending()) {
           if (next.tryLock()) {
             try {
+              // 再次check该dwpt没有被其他线程取走，其他线程包括：index线程 或 触发新一轮full flush的线程
               if (perThreadPool.isRegistered(next)) {
                 return checkOutForFlush(next);
               }
@@ -504,9 +519,11 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
         // progress full flush.
         return perThread;
       } else {
+        // 这种情况发生在：full flush刚切换deleteQueue 还没来得及 锁住该dwpt
         try {
           // we must first assert otherwise the full flush might make progress once we unlock the
           // dwpt
+          // TODO 这个两个字段应该设置为volatile，因为上面getAndLock会先持有同步锁，因此这里没有啥问题。
           assert fullFlush && fullFlushMarkDone == false
               : "found a stale DWPT but full flush mark phase is already done fullFlush: "
                   + fullFlush
@@ -543,6 +560,8 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
         DocumentsWriterDeleteQueue newQueue =
             documentsWriter.deleteQueue.advanceQueue(perThreadPool.size());
         seqNo = documentsWriter.deleteQueue.getMaxSeqNo();
+
+        // 从这里开始，新建的DWPT都将使用新的delete queue
         documentsWriter.resetDeleteQueue(newQueue);
       } finally {
         perThreadPool.unlockNewWriters();
@@ -624,6 +643,10 @@ final class DocumentsWriterFlushControl implements Accountable, Closeable {
     try {
       if (!blockedFlushes.isEmpty()) {
         assert assertBlockedFlushes(documentsWriter.deleteQueue);
+        /**
+         * 这里处理full flush触发自后，与新的delete queue关联的dwpt的flushes。
+         * 参见{@link DocumentsWriterFlushControl#checkout}
+         */
         pruneBlockedQueue(documentsWriter.deleteQueue);
         assert blockedFlushes.isEmpty();
       }
