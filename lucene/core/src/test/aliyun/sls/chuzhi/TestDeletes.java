@@ -12,27 +12,21 @@ import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
 
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class TestDeletes {
 
+    private final static String softDeletesField  = "deleted";
+
     public static void main(String[] args) throws Exception{
         Directory dir = new ByteBuffersDirectory();
-        String softDeletesField  = "deleted";
-
-        Supplier<IndexWriterConfig> configSupplier = new Supplier<IndexWriterConfig>() {
-            @Override
-            public IndexWriterConfig get() {
-                IndexWriterConfig indexWriterConfig = new IndexWriterConfig(new StandardAnalyzer());
-                indexWriterConfig.setUseCompoundFile(false);
-                indexWriterConfig.setSoftDeletesField(softDeletesField);
-                indexWriterConfig.setMergePolicy(NoMergePolicy.INSTANCE);
-                return indexWriterConfig;
-            }
-        };
 
         {
-            IndexWriter indexWriter = new IndexWriter(dir, configSupplier.get());
+            IndexWriter indexWriter = new IndexWriter(dir, getWriterConfig(createKeepAllCommitsPolicy()));
             Document doc;
 
             // 文档0
@@ -96,41 +90,139 @@ public class TestDeletes {
             {
                 DirectoryReader reader = DirectoryReader.open(indexWriter);
 
-                ScoreDoc[] scoreDocs = (new IndexSearcher(reader)).search(new MatchAllDocsQuery(), 100).scoreDocs;
-                for (ScoreDoc scoreDoc : scoreDocs) {
-                    System.out.println("docId: 文档" + scoreDoc.doc
-                            + ", docName: " + reader.document(scoreDoc.doc).get("docName")
-                            + ", value: " + reader.document(scoreDoc.doc).get("value"));
-                }
-                System.out.println("---------");
+                search(reader, "case #1");
+                System.out.println("------------------");
 
                 LeafReader leafReader = reader.leaves().get(0).reader();
                 BinaryDocValues binaryDVs = leafReader.getBinaryDocValues("sqlCol");
                 while (binaryDVs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
                     System.out.println("docId:" + binaryDVs.docID() + ", value: " + binaryDVs.binaryValue().utf8ToString());
                 }
-                System.out.println("---------");
+                System.out.println("------------------");
 
                 NumericDocValues numericDVs = leafReader.getNumericDocValues(softDeletesField);
                 while (numericDVs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
                     System.out.println("docId:" + numericDVs.docID() + ", value: " + numericDVs.longValue());
                 }
-                System.out.println("---------");
+                System.out.println("------------------");
+
+                reader.close();
             }
 
             indexWriter.close();
         }
 
         {
-            IndexWriter indexWriter = new IndexWriter(dir, configSupplier.get());
+            IndexWriter indexWriter = new IndexWriter(dir, getWriterConfig(createKeepAllCommitsPolicy()));
 
             indexWriter.updateBinaryDocValue(new Term("docName", "document0"), "sqlCol", new BytesRef("dv0-new2"));
             indexWriter.flush();
 
             indexWriter.updateBinaryDocValue(new Term("docName", "document0"), "sqlCol", new BytesRef("dv0-new3"));
             indexWriter.flush();
+
+            indexWriter.commit();
+            indexWriter.close();
         }
 
+        System.out.println("all files #1: " + Arrays.asList(dir.listAll()));
+        System.out.println("------------------");
+
+        {
+            IndexWriter indexWriter = new IndexWriter(dir, getWriterConfig(createDeleteAllCommitsPolicy()));
+
+            /**
+             *
+             */
+            System.out.println("all files #2.1: " + Arrays.asList(dir.listAll()));
+
+            // 文档2
+            Document doc = new Document();
+            doc.add(new StringField("docName", "document10", Field.Store.YES));
+            doc.add(new StringField("value", "10", Field.Store.YES));
+            indexWriter.addDocument(doc);
+
+            {
+                DirectoryReader reader = DirectoryReader.open(indexWriter);
+                search(reader, "case #2");
+                reader.close();
+            }
+
+            System.out.println("all files #2.2: " + Arrays.asList(dir.listAll()));
+
+            /**
+             * close的时候默认会进行commit操作，但是当采用delete all commits policy时，生成的
+             * segments_N文件会被立刻删除（参见{@link IndexFileDeleter#checkpoint}，此时参数
+             * isCommit为true)。而当{@link IndexFileDeleter#close}执行时，没有被segments_N
+             * 引用的文件都将被清楚。因此，indexWriter.close()结束后，index目录中将为空。
+             */
+            indexWriter.close();
+            System.out.println("------------------");
+        }
+
+        System.out.println("all files #3: " + Arrays.asList(dir.listAll()));
+        System.out.println("------------------");
+
+        {
+            IndexWriter indexWriter = new IndexWriter(dir, getWriterConfig(createDeleteAllCommitsPolicy()));
+
+            System.out.println("all files #4: " + Arrays.asList(dir.listAll()));
+
+            {
+                DirectoryReader reader = DirectoryReader.open(indexWriter);
+                search(reader, "case #4");
+                reader.close();
+            }
+
+            indexWriter.close();
+            System.out.println("------------------");
+        }
+
+        System.out.println("all files #5: " + Arrays.asList(dir.listAll()));
     }
 
+    private static IndexWriterConfig getWriterConfig(IndexDeletionPolicy indexDeletionPolicy) {
+        IndexWriterConfig indexWriterConfig = new IndexWriterConfig(new StandardAnalyzer());
+        indexWriterConfig.setUseCompoundFile(false);
+        indexWriterConfig.setSoftDeletesField(softDeletesField);
+        indexWriterConfig.setMergePolicy(NoMergePolicy.INSTANCE);
+        if (indexDeletionPolicy != null) {
+            indexWriterConfig.setIndexDeletionPolicy(indexDeletionPolicy);
+        }
+        return indexWriterConfig;
+    }
+
+    private static IndexDeletionPolicy createKeepAllCommitsPolicy() {
+        return new IndexDeletionPolicy() {
+            @Override
+            public void onInit(List<? extends IndexCommit> commits) throws IOException {}
+
+            @Override
+            public void onCommit(List<? extends IndexCommit> commits) throws IOException {}
+        };
+    }
+
+    private static IndexDeletionPolicy createDeleteAllCommitsPolicy() {
+        return new IndexDeletionPolicy() {
+            @Override
+            public void onInit(List<? extends IndexCommit> commits) throws IOException {
+                commits.forEach(IndexCommit::delete);
+            }
+
+            @Override
+            public void onCommit(List<? extends IndexCommit> commits) throws IOException {
+                commits.forEach(IndexCommit::delete);
+            }
+        };
+    }
+
+    private static void search(DirectoryReader reader, String tip) throws IOException {
+        System.out.println("start search: " + tip);
+        ScoreDoc[] scoreDocs = (new IndexSearcher(reader)).search(new MatchAllDocsQuery(), 100).scoreDocs;
+        for (ScoreDoc scoreDoc : scoreDocs) {
+            System.out.println("docId: 文档" + scoreDoc.doc
+                    + ", docName: " + reader.document(scoreDoc.doc).get("docName")
+                    + ", value: " + reader.document(scoreDoc.doc).get("value"));
+        }
+    }
 }

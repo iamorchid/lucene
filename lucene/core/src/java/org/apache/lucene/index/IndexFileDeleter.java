@@ -218,7 +218,15 @@ final class IndexFileDeleter implements Closeable {
     if (pendingDeletions.isEmpty() == false) {
       relevantFiles.addAll(pendingDeletions);
     }
+
     // refCounts only includes "normal" filenames (does not include write.lock)
+    /**
+     * 下面的操作可以解决这样一个问题：假设当前index有3个commits：segments_8, segments_9,
+     * segments_10。此时用户使用segments_8来打开IndexWriter，那么后续commit时，将会覆盖
+     * segments_9和segments_10，因为segments_8记录的generation为8 （下一个commit的
+     * generation即为9）。其他文件的覆盖有类似的问题（如segment文件名，DV文件名等）。而
+     * {@link #inflateGens} 就是为了解决这种潜在问题。
+     */
     inflateGens(segmentInfos, relevantFiles, infoStream);
 
     // Now delete anything with ref count at 0.  These are
@@ -249,6 +257,15 @@ final class IndexFileDeleter implements Closeable {
 
     // Always protect the incoming segmentInfos since
     // sometime it may not be the most recent commit
+    // 上面注释的意思是：默认采用的IndexDeletionPolicy策略只会保留
+    // latest commit，如果传入的segmentInfos不是和latest commit
+    // 对应，我们这里不进行checkpoint操作（即增加文件引用计数），那么
+    // segmentInfos关联的文件在进行deleteCommits()有可能被删除，
+    // 从而导致segmentInfos不可用。
+    /**
+     * 该操作可以保证即使对应的commits被IndexDeletionPolicy删除时，segmentInfos
+     * 引用的文件仍然可以被IndexWriter可访问，即index仍然可用。
+     */
     checkpoint(segmentInfos, false);
 
     if (currentCommitPoint == null) {

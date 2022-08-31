@@ -3652,7 +3652,17 @@ public class IndexWriter
               // no partial changes (eg a delete w/o
               // corresponding add from an updateDocument) can
               // sneak into the commit point:
-              toCommit = segmentInfos.clone();
+              /**
+               * 1）持有fullFlushLock锁，进行{@link DocumentsWriter#flushAllThreads}操作后，
+               *    可以保证不会有新的原始segment产生（即非merge生成的合成segment，但merge此时还
+               *    是可以进行的）。同时，{@link #publishFlushedSegments}, {@link #processEvents},
+               *    {@link #applyAllDeletesAndUpdates}执行后，可以保证所有的更新都apply到了
+               *    {@link ReadersAndUpdates}, 但此时更新还没有写入文件。
+               * 2）持有IndexWriter同步锁，可以避免merge的干扰，主要是进行segment替换。当
+               *    {@link #writeReaderPool}执行完成后（即将更新写入文件）, {@link #segmentInfos}
+               *    将不会改变。
+               */
+              toCommit = segmentInfos.clone(); // 可以认为是获取当前segments的snapshot
               pendingCommitChangeCount = changeCount.get();
               // This protects the segmentInfos we are now going
               // to commit.  This is important in case, eg, while
@@ -3759,9 +3769,16 @@ public class IndexWriter
       MergeTrigger trigger,
       IOConsumer<SegmentCommitInfo> mergeFinished)
       throws IOException {
-    assert Thread.holdsLock(this);
+    assert Thread.holdsLock(this); // 重要
     assert trigger == MergeTrigger.GET_READER || trigger == MergeTrigger.COMMIT
         : "illegal trigger: " + trigger;
+
+    /**
+     * 在看下面的mergeFinished实现时，需要理解这里一个隐含的语义，即参数mergingSegmentInfos
+     * 是{@link #segmentInfos}的当前副本（这个函数要求调用者持有IndexWriter对象锁，从而保证
+     * {@link #segmentInfos}不会发生变更）。而下面调用{@link #updatePendingMerges}方法时，
+     * 是能保证进行merge使用的{@link #segmentInfos}和参数mergingSegmentInfos是一致的。
+     */
     MergePolicy.MergeSpecification pointInTimeMerges =
         updatePendingMerges(
             new OneMergeWrappingMergePolicy(
@@ -3816,13 +3833,12 @@ public class IndexWriter
                             }
                           }
                           // Construct a OneMerge that applies to toCommit
-                          MergePolicy.OneMerge applicableMerge =
-                              new MergePolicy.OneMerge(toCommitMergedAwaySegments);
+                          MergePolicy.OneMerge applicableMerge = new MergePolicy.OneMerge(toCommitMergedAwaySegments);
                           applicableMerge.info = origInfo;
-                          long segmentCounter =
-                              Long.parseLong(origInfo.info.name.substring(1), Character.MAX_RADIX);
-                          mergingSegmentInfos.counter =
-                              Math.max(mergingSegmentInfos.counter, segmentCounter + 1);
+                          long segmentCounter = Long.parseLong(origInfo.info.name.substring(1), Character.MAX_RADIX);
+                          // 需要保证counter比mergingSegmentInfos中已有segments的名称数字大，这个mergingSegmentInfos
+                          // 在commit提交的时候，用于生成segments_N文件。而counter作用主要是给新segment进行命名。
+                          mergingSegmentInfos.counter = Math.max(mergingSegmentInfos.counter, segmentCounter + 1);
                           mergingSegmentInfos.applyMergeChanges(applicableMerge, false);
                         } else {
                           if (infoStream.isEnabled("IW")) {
@@ -3844,6 +3860,11 @@ public class IndexWriter
                           mergeFinished.accept(info);
                           // clone the target info to make sure we have the original info without
                           // the updated del and update gens
+                          /**
+                           * point-in-time merge不考虑后续的updates，这也是point-in-time的含义所在。
+                           * {@link IndexWriter#commitMerge}先调用z这里的{@link #onMergeComplete}，
+                           * 然后在提交发生在merge触发后的updates。
+                           */
                           origInfo = info.clone();
                         }
                         toWrap.onMergeComplete();

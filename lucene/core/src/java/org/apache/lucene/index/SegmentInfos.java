@@ -128,6 +128,11 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
   /** Counts how often the index has been changed. */
   public long version;
 
+  /**
+   * 在生成新的commit之前，会advance这个值，因此这个既可以表示当前最新commit的generation
+   * 值（advance没有执行之前，见{@link #write(Directory)}），也可以表示将要生成的下一个
+   * commit的generation（advance之后）。
+   */
   private long generation; // generation of the "segments_N" for the next commit
   private long lastGeneration; // generation of the "segments_N" file we last successfully read
   // or wrote; this is normally the same as generation except if
