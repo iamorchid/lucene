@@ -44,6 +44,12 @@ class SortedDocValuesWriter extends DocValuesWriter<SortedDocValues> {
   private final FieldInfo fieldInfo;
   private int lastDocID = -1;
 
+  /**
+   * 注意：finalOrds保存的其实是termId信息，而非termOrd
+   * finalOrds        : docId   -> termId
+   * finalSortedValues: termOrd -> termId
+   * finalOrdMap      : termId  -> termOrd
+   */
   private PackedLongValues finalOrds;
   private int[] finalSortedValues;
   private int[] finalOrdMap;
@@ -185,15 +191,15 @@ class SortedDocValuesWriter extends DocValuesWriter<SortedDocValues> {
   static class BufferedSortedDocValues extends SortedDocValues {
     final BytesRefHash hash;
     final BytesRef scratch = new BytesRef();
-    final int[] sortedValues;
-    final int[] ordMap;
+    final int[] sortedValues; // termOrd -> termId
+    final int[] ordMap; // termId -> termOrd
     private int ord;
-    final PackedLongValues.Iterator iter;
+    final PackedLongValues.Iterator iter; // termIds
     final DocIdSetIterator docsWithField;
 
     public BufferedSortedDocValues(
         BytesRefHash hash,
-        PackedLongValues docToOrd,
+        PackedLongValues docToOrd,  // 这是doc->termId
         int[] sortedValues,
         int[] ordMap,
         DocIdSetIterator docsWithField) {

@@ -113,7 +113,7 @@ public final class IndexedDISI extends DocIdSetIterator {
     assert block >= 0 && block < 65536;
     out.writeShort((short) block);
     assert cardinality > 0 && cardinality <= 65536;
-    out.writeShort((short) (cardinality - 1));
+    out.writeShort((short) (cardinality - 1)); // short无法保存65536
     if (cardinality > MAX_ARRAY_LENGTH) {
       if (cardinality != 65536) { // all docs are set
         if (denseRankPower != -1) {
@@ -407,6 +407,10 @@ public final class IndexedDISI extends DocIdSetIterator {
     }
   }
 
+  /**
+   * block = Short.toUnsignedInt(slice.readShort()) << 16;
+   * 这里的block变量其实block中第一个doc的docId。
+   */
   int block = -1;
   long blockEnd;
   long denseBitmapOffset = -1; // Only used for DENSE blocks
@@ -445,6 +449,14 @@ public final class IndexedDISI extends DocIdSetIterator {
       if (method.advanceWithinBlock(this, target)) {
         return doc;
       }
+      /**
+       * 虽然查询的target位于当前的block范围中，这个target doc可能是不存在的
+       * 且这个block中不存在大于target的其他doc ID。因此，需要从下一个block中
+       * 继续查找（下一个block中存在任意一个的doc ID肯定比target要大）。
+       *
+       * 注意，因为当前block已经处理完了，因此slice的offset当前必定指向下一个
+       * block的起始位置，因此无需对slice进行seek操作。
+       */
       readBlockHeader();
     }
     boolean found = method.advanceWithinBlock(this, block);
@@ -472,7 +484,14 @@ public final class IndexedDISI extends DocIdSetIterator {
           blockIndex < jumpTableEntryCount ? blockIndex : jumpTableEntryCount - 1;
       final int index = jumpTable.readInt(inRangeBlockIndex * Integer.BYTES * 2);
       final int offset = jumpTable.readInt(inRangeBlockIndex * Integer.BYTES * 2 + Integer.BYTES);
+
+      /**
+       * 当前block内的doc在DISI中的基序号其实就是index。下面进行减1操作主要是为了方便
+       * advance操作（即每读取一个doc，就对index+1，此时的index正好是doc在DISI中序号），
+       * 可以参考{@link Method#advanceWithinBlock}。
+       */
       this.nextBlockIndex = index - 1; // -1 to compensate for the always-added 1 in readBlockHeader
+
       slice.seek(offset);
       readBlockHeader();
       return;
@@ -488,6 +507,7 @@ public final class IndexedDISI extends DocIdSetIterator {
   private void readBlockHeader() throws IOException {
     block = Short.toUnsignedInt(slice.readShort()) << 16;
     assert block >= 0;
+    // 写入时的值为：cardinality - 1
     final int numValues = 1 + Short.toUnsignedInt(slice.readShort());
     index = nextBlockIndex;
     nextBlockIndex = index + numValues;
@@ -497,12 +517,19 @@ public final class IndexedDISI extends DocIdSetIterator {
     } else if (numValues == 65536) {
       method = Method.ALL;
       blockEnd = slice.getFilePointer();
+
+      /**
+       * 计算该block中doc的在DISI中的序号时，采用计算公式：docId - gap，即
+       * (docId - blockBaseDocId) + (index+1)。这里的{@link block}其实就是
+       * block中第一个doc的ID。gap的用处参考{@link Method.ALL}。至于为何使用
+       * (index+1)，可以参加{@link IndexedDISI#advanceBlock}。
+       */
       gap = block - index - 1;
     } else {
       method = Method.DENSE;
       denseBitmapOffset =
           slice.getFilePointer() + (denseRankTable == null ? 0 : denseRankTable.length);
-      blockEnd = denseBitmapOffset + (1 << 13);
+      blockEnd = denseBitmapOffset + (1 << 13); // 64K个bit，即13K个byte
       // Performance consideration: All rank (default 128 * 16 bits) are loaded up front. This
       // should be fast with the
       // reusable byte[] buffer, but it is still wasted if the DENSE block is iterated in small

@@ -18,6 +18,7 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import org.apache.lucene.codecs.Codec;
@@ -31,6 +32,8 @@ import org.apache.lucene.codecs.StoredFieldsReader;
 import org.apache.lucene.codecs.TermVectorsReader;
 import org.apache.lucene.internal.tests.SegmentReaderAccess;
 import org.apache.lucene.internal.tests.TestSecrets;
+import org.apache.lucene.search.Collector;
+import org.apache.lucene.search.Weight;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.util.Bits;
@@ -88,12 +91,17 @@ public final class SegmentReader extends CodecReader {
     // We pull liveDocs/DV updates from disk:
     this.isNRT = false;
 
-    core = new SegmentCoreReaders(si.info.dir, si, context);
+    core = new SegmentCoreReaders(si.info, context);
     segDocValues = new SegmentDocValues();
 
     boolean success = false;
     final Codec codec = si.info.getCodec();
     try {
+      /**
+       * 这里可以看到，对于NRT为false的情况，liveDocs中是没有排除软删除的，即通过这里创建的
+       * SegmentReader进行查询，将会返回满足查询的软删除结果。其实，通过这个构造函数生成的
+       * SegmentReader没有软删除的概念，因为这里没有传入软删除字段信息。
+       */
       if (si.hasDeletions()) {
         // NOTE: the bitvector is stored using the regular directory, not cfs
         hardLiveDocs =
@@ -139,16 +147,40 @@ public final class SegmentReader extends CodecReader {
       throw new IllegalArgumentException(
           "maxDoc=" + si.info.maxDoc() + " but liveDocs.size()=" + liveDocs.length());
     }
+
+    /**
+     * 这里必须采用{@link SegmentCommitInfo}的snapshot，这样可以确保SR看到的数据始终和SI是
+     * 一致的。否则，不采用snapshot，SI将会在后续发生变动。因此，通过{@link SegmentReader}可
+     * 以读取某个segment的snapshot状态。后续这个segment的变更，不会影响从SegmentReader读取的
+     * 结果。
+     *
+     * 注意，SegmentReader的使用方需要保证snapshot关联的底层文件不因为commits merge被删除，
+     * 通常做法是，在获取IndexWriter对象锁后（此时merge无法进行提交），增加对应文件的计数，可以
+     * 参见{@link IndexWriter#getReader}中的相关操作。
+     */
     this.si = si.clone();
+
     this.originalSi = si;
     this.metaData = sr.getMetaData();
+
+    /**
+     * liveDocs包含软删除，而hardLiveDocs则不包含。在查询的时候，过滤删除的文档使用的是liveDocs，
+     * 参见{@link org.apache.lucene.search.IndexSearcher#search(List, Weight, Collector)}。
+     */
     this.liveDocs = liveDocs;
     this.hardLiveDocs = hardLiveDocs;
+
     assert assertLiveDocs(isNRT, hardLiveDocs, liveDocs);
     this.isNRT = isNRT;
     this.numDocs = numDocs;
+
+    /**
+     * {@link SegmentCoreReaders}由{@link SegmentInfo}初始化而来，其内容不会发生变动，即不包含
+     * 删除以及DV更新）。而segment的所有变动信息，都由{@link SegmentCommitInfo}来承载。
+     */
     this.core = sr.core;
     core.incRef();
+
     this.segDocValues = sr.segDocValues;
 
     boolean success = false;

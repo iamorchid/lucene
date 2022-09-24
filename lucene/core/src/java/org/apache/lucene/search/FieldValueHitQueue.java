@@ -77,11 +77,24 @@ public abstract class FieldValueHitQueue<T extends FieldValueHitQueue.Entry>
       assert hitA != hitB;
       assert hitA.slot != hitB.slot;
 
+      /**
+       * 下面的逻辑并不好理解，需要结合{@link PriorityQueue}的特性来理解。{@link TopDocsCollector#pq}
+       * 采用的是最小堆（即堆顶元素最小），这里的{@link #lessThan}就是来判断两个对元素关系的。当堆满时（即
+       * 堆中的元素数量达到了要求的hits时），会判断新加的元素是否比堆顶元素大。如果是，则置换堆顶为新元素并调整
+       * 最小堆。
+       * 结合{@link TopDocsCollector#topDocs(int, int)}的实现可以知道，排序越靠前的文档，需要保证其在
+       * {@link PriorityQueue}中值的越大（通过堆顶元素置换的规则也可以知道）。因此，{@link #lessThan}返
+       * 回的结果必须是和下面的compare关系是反向的，即!(c<0)，其中c<0表示排序过程中，hitA比hitB靠前。
+       */
       final int c = oneReverseMul * oneComparator.compare(hitA.slot, hitB.slot);
       if (c != 0) {
+        // c>0时表示hitB应该排序更靠前，即hitA在PriorityQueue的值（或相关性）更小。
         return c > 0;
       }
 
+      /**
+       * 文档ID越小，其排序需要越靠前。因此，如果hitA.doc>hitB.doc，则表示hitA相关型更小。
+       */
       // avoid random sort order that could lead to duplicates (bug #31241):
       return hitA.doc > hitB.doc;
     }

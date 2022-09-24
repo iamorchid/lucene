@@ -285,6 +285,13 @@ final class ReadersAndUpdates {
     // is running, by now we have carried forward those
     // deletes onto the newly merged segment, so we can
     // discard them on the sub-readers:
+    /**
+     * 这里为啥不清理{@link #pendingDVUpdates}?
+     *
+     * 对于已经被merge的segment，不进行{@link #dropChanges()}又会怎样？ 我能
+     * 想到的是：在调用{@link ReaderPool#release}，避免将这个segment的改动落
+     * 盘，因为没有必要。
+     */
     pendingDeletes.dropChanges();
     dropMergingUpdates();
   }
@@ -694,8 +701,8 @@ final class ReadersAndUpdates {
       /**
        * 这个函数名称不对，进行swap后，reader不仅仅具有最新的live docs信息，还有最新的field和DV信息。
        * Load字段最新的DV信息并不是基于{@link SegmentCommitInfo#dvUpdatesFiles} (此时这个还没有
-       * 更新，见下面更新逻辑)，而是基于{@link FieldInfo#dvGen}（这个值在上面调用handleDVUpdates中
-       * 已经更新），resolve对应的DV文件。
+       * 更新，见下面更新逻辑)，而是基于{@link FieldInfo#dvGen获取对应的文件内容}（这个值在上面调用
+       * handleDVUpdates中已经更新），resolve对应的DV文件。
        */
       swapNewReaderWithLatestLiveDocs();
     }

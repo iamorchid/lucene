@@ -386,7 +386,7 @@ final class DocumentsWriterPerThread implements Accountable {
       DocIdSetIterator softDeletedDocs;
       if (indexWriterConfig.getSoftDeletesField() != null) {
         // flush之后，会丢弃in-memory中的引用信息，因此这里在flush之前获取相关的软删除信息。
-        // 只要文档的DV中包含软删除字段，就满足软删除，而DV的值则无关。
+        // 只要文档的DV中包含软删除字段，就满足软删除，与DV的值则无关。
         softDeletedDocs = indexingChain.getHasDocValues(indexWriterConfig.getSoftDeletesField());
       } else {
         softDeletedDocs = null;

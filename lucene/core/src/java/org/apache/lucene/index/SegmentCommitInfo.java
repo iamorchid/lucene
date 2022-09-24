@@ -55,6 +55,10 @@ public class SegmentCommitInfo {
   private long nextWriteDelGen;
 
   // Generation number of the FieldInfos (-1 if there are no updates)
+  /**
+   * 每次只要由field的DV发生更新，fieldInfos也要随之更新（因为每个field信息中
+   * 包含了各自的dvGen，见{@link FieldInfo#dvGen}。
+   */
   private long fieldInfosGen;
 
   // Normally 1+fieldInfosGen, unless an exception was hit on last attempt to

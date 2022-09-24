@@ -56,6 +56,11 @@ public final class StandardDirectoryReader extends DirectoryReader {
       throws IOException {
     super(directory, readers, leafSorter);
     this.writer = writer;
+    /**
+     * 这里的SIS并不是{@link IndexWriter#segmentInfos}，它的内容不会
+     * 再变更。在SDR#open的时候会incr相关文件的引用，而在SDR#doClose进行
+     * 引用清理（从而保证不在被commits引用的文件被删除）。
+     */
     this.segmentInfos = sis;
     this.applyAllDeletes = applyAllDeletes;
     this.writeAllDeletes = writeAllDeletes;
@@ -125,7 +130,9 @@ public final class StandardDirectoryReader extends DirectoryReader {
     final List<SegmentReader> readers = new ArrayList<>(numSegments);
     final Directory dir = writer.getDirectory();
 
+    // 必须是clone
     final SegmentInfos segmentInfos = infos.clone();
+
     int infosUpto = 0;
     try {
       for (int i = 0; i < numSegments; i++) {
@@ -147,6 +154,8 @@ public final class StandardDirectoryReader extends DirectoryReader {
         }
       }
 
+      // 保证leaf readers引用的文件不被merge进行清理(merge会清理commits及其
+      // 引用的文件，这边保证当reader打开的时候，相关的文件引用不会降为0)。
       writer.incRefDeleter(segmentInfos);
 
       StandardDirectoryReader result =

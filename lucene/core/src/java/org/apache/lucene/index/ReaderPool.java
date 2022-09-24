@@ -177,7 +177,7 @@ final class ReaderPool implements Closeable {
 
   /**
    * Releases the {@link ReadersAndUpdates}. This should only be called if the {@link
-   * #get(SegmentCommitInfo, boolean)} is called with the create paramter set to true.
+   * #get(SegmentCommitInfo, boolean)} is called with the create parameter set to true.
    *
    * @return <code>true</code> if any files were written by this release call.
    */

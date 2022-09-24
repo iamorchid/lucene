@@ -532,6 +532,7 @@ public class IndexWriter
         sci -> {
           final ReadersAndUpdates rld = getPooledInstance(sci, true);
           try {
+            // 必须持有对象所，从而保证SegmentReader所引用的底层文件不被merge清理
             assert Thread.holdsLock(IndexWriter.this);
             SegmentReader segmentReader = rld.getReadOnlyClone(IOContext.READ);
             // only track this if we actually do fullFlush merges
@@ -589,6 +590,10 @@ public class IndexWriter
             // then do this w/o IW's lock?
             // Must do this sync'd on IW to prevent a merge from completing at the last second and
             // failing to write its DV updates:
+            /**
+             * DV更新要对新的reader可见的话，目前只能写入到磁盘中（严格说说OS的page cache中，
+             * 此时并不一定罗盘，但通过文件系统已经是可见的）
+             */
             writeReaderPool(writeAllDeletes);
 
             // Prevent segmentInfos from changing while opening the
@@ -626,8 +631,14 @@ public class IndexWriter
                         SegmentReader apply = readerFactory.apply(sci);
                         mergedReaders.put(sci.info.name, apply);
                         // we need to incRef the files of the opened SR otherwise it's possible that
-                        // another merge
-                        // removes the segment before we pass it on to the SDR
+                        // another merge removes the segment before we pass it on to the SDR
+                        /**
+                         * 可以看到，调用者获取SegmentReader后，需要自己保证reader引用的文件不被删除。
+                         * 这可以通过手动incr文件引用，或者在使用SegmentReader时，持有IndexWriter
+                         * 对象锁保证（这可以保证merge无法清理commits）。
+                         *
+                         * 可以参见{@link StandardDirectoryReader#open}，也会增加相关文件的引用计数。
+                         */
                         deleter.incRef(sci.files());
                       });
               onGetReaderMergeResources =
@@ -637,6 +648,10 @@ public class IndexWriter
                     // all resources, closes the merged readers and decrements the files references.
                     // this only happens for readers that haven't been removed from the
                     // mergedReaders and release elsewhere
+                    /**
+                     * 如果mergedReaders被后面的新open的{@link StandardDirectoryReader}使用，则它会被置
+                     * 为空，见{@link #finishGetReaderMerge} 和 {@link #maybeReopenMergedNRTReader}.
+                     */
                     synchronized (this) {
                       stopCollectingMergedReaders.set(true);
                       IOUtils.close(
@@ -672,6 +687,11 @@ public class IndexWriter
         }
       }
       if (onGetReaderMerges != null) { // only relevant if we do merge on getReader
+        /**
+         * 对于openedReadOnlyClones的SegmentReader，它们目前正在被r使用，因此虽然
+         * IndexWriter对象锁已经释放，此时即使merge发生，它们使用的文件也不会被删除。
+         * 因为，{@link StandardDirectoryReader#open}会增加它们使用的文件的计数。
+         */
         StandardDirectoryReader mergedReader =
             finishGetReaderMerge(
                 stopCollectingMergedReaders,
@@ -745,6 +765,10 @@ public class IndexWriter
     }
   }
 
+  /**
+   *
+   *
+   */
   private StandardDirectoryReader maybeReopenMergedNRTReader(
       Map<String, SegmentReader> mergedReaders,
       Map<String, SegmentReader> openedReadOnlyClones,
@@ -842,6 +866,11 @@ public class IndexWriter
                 // this is also best effort to free ram, there might be some other thread writing
                 // this rld concurrently
                 // which wins and then if readerPooling is off this rld will be dropped.
+                /**
+                 * 我觉得这里也应该检查下rld.info是否在{@link #mergingSegments}中，如果在的话，也可以暂
+                 * 时跳过写DV更新，因为很有可能在merge结束后，这个segment就被drop掉了（那么这里的DV写盘操
+                 * 作就没有意义了）。
+                 */
                 if (readerPool.get(rld.info, false) == null) {
                   continue;
                 }
@@ -3657,10 +3686,11 @@ public class IndexWriter
                *    可以保证不会有新的原始segment产生（即非merge生成的合成segment，但merge此时还
                *    是可以进行的）。同时，{@link #publishFlushedSegments}, {@link #processEvents},
                *    {@link #applyAllDeletesAndUpdates}执行后，可以保证所有的更新都apply到了
-               *    {@link ReadersAndUpdates}, 但此时更新还没有写入文件。
-               * 2）持有IndexWriter同步锁，可以避免merge的干扰，主要是进行segment替换。当
-               *    {@link #writeReaderPool}执行完成后（即将更新写入文件）, {@link #segmentInfos}
-               *    将不会改变。
+               *    {@link ReadersAndUpdates}, 但此时更新还没有写入文件。同时，还可以保证不会有
+               *    新的updates被apply到当前的原始segment上。
+               * 2）持有IndexWriter同步锁，可以避免merge的干扰（即避免merge对{@link #segmentInfos}）
+               *    进行更新。当{@link #writeReaderPool}完成后（即将更新写入文件）, {@link #segmentInfos}
+               *    将不会改变（包括包含的segments以及它们引用的文件）。
                */
               toCommit = segmentInfos.clone(); // 可以认为是获取当前segments的snapshot
               pendingCommitChangeCount = changeCount.get();
@@ -3852,6 +3882,10 @@ public class IndexWriter
 
                       @Override
                       void onMergeComplete() throws IOException {
+                        /**
+                         * {@link #onMergeComplete()}会在{@link IndexWriter#commitMerge}中被调用，
+                         * 此时会持有IndexWriter同步锁。
+                         */
                         assert Thread.holdsLock(IndexWriter.this);
                         if (stopCollectingMergeResults.getAsBoolean() == false
                             && isAborted() == false
@@ -3862,7 +3896,7 @@ public class IndexWriter
                           // the updated del and update gens
                           /**
                            * point-in-time merge不考虑后续的updates，这也是point-in-time的含义所在。
-                           * {@link IndexWriter#commitMerge}先调用z这里的{@link #onMergeComplete}，
+                           * {@link IndexWriter#commitMerge}先调用这里的{@link #onMergeComplete}，
                            * 然后在提交发生在merge触发后的updates。
                            */
                           origInfo = info.clone();
@@ -3875,6 +3909,11 @@ public class IndexWriter
                       void initMergeReaders(
                           IOFunction<SegmentCommitInfo, MergePolicy.MergeReader> readerFactory)
                           throws IOException {
+                        /**
+                         * 这里的if检查感觉是多此一举，对于OneMerge而言，这个怎么会调用多次？
+                         * 可以参见{@link org.apache.lucene.index.MergePolicy.OneMerge#initMergeReaders}
+                         * 的内部assert逻辑。
+                         */
                         if (onlyOnce.compareAndSet(false, true)) {
                           // we do this only once below to pull readers as point in time readers
                           // with respect to the commit point
@@ -5066,18 +5105,32 @@ public class IndexWriter
           droppedSegment,
           mr -> {
             if (merge.usesPooledReaders) {
+              /**
+               * 要理解下面的逻辑，参考{@link #mergeMiddle}中如何初始化对应{@link SegmentReader}.
+               */
               final SegmentReader sr = mr.reader;
               final ReadersAndUpdates rld = getPooledInstance(sr.getOriginalSegmentInfo(), false);
               // We still hold a ref so it should not have been removed:
+              /**
+               * 因为之前从readerPool获取rld时，采用的create参数为true。在我们调用
+               * {@link ReaderPool#release}之前，rld一定还在readerPool中。
+               */
               assert rld != null;
               if (drop) {
                 rld.dropChanges();
               } else {
                 rld.dropMergingUpdates();
               }
+              /**
+               * 通过{@link ReadersAndUpdates#getReaderForMerge}会增加{@link SegmentReader}
+               * 的引用计数，这里是减少计数（如果计数降为0，则进行清理）。注意，这里的sr并不一定就是
+               * {@link ReadersAndUpdates#reader}。
+               */
               rld.release(sr);
+              // 释放getPooledInstance采用create为true时增加的引用。
               release(rld);
               if (drop) {
+                // 将rld从readerPool中丢弃（该segment在merge结束后，不再会用到）
                 readerPool.drop(rld.info);
               }
             }
@@ -5146,12 +5199,39 @@ public class IndexWriter
     // closed:
     boolean success = false;
     try {
+      /**
+       * TODO ......
+       *
+       * 在merge过程中，可以保证当前merge使用的{@link SegmentCommitInfo}不被其他merge
+       * 删除，但怎么保证{@link SegmentReader}当前使用的DV文件不会因为flush操作删除，即
+       * 覆盖并进行{@link IndexFileDeleter#checkpoint}后，老的DV文件被删除。这里没有看
+       * 到增加文件的引用。
+       *
+       * 经过验证，这种情况确实可能发生的。在Linux，对于已经open的文件，即使这个文件被删除，
+       * 也是可以正常访问的，但其他系统可能不允许删除正在打开的文件，可以参见文件删除的异常
+       * 处理{@link org.apache.lucene.store.FSDirectory#privateDeleteFile}。
+       *
+       * 但很显然，更合理的做法是增加相关文件的引用计数，避免文件在使用过程中就进行删除操作。
+       *
+       */
       merge.initMergeReaders(
           sci -> {
             final ReadersAndUpdates rld = getPooledInstance(sci, true);
             rld.setIsMerging();
             return rld.getReaderForMerge(context);
           });
+
+      /**
+       * 这里的代码是验证上面的DV文件被删除的想法，结合TestMerge.java
+       */
+//      System.out.println("merge sleep started");
+//      try {
+//        TimeUnit.SECONDS.sleep(10);
+//      } catch (Throwable e) {
+//
+//      }
+//      System.out.println("merge sleep ended");
+
       // Let the merge wrap readers
       List<CodecReader> mergeReaders = new ArrayList<>();
       Counter softDeleteCount = Counter.newCounter(false);
@@ -6089,6 +6169,13 @@ public class IndexWriter
     }
   }
 
+  /**
+   * 当create参数为false时，如果这个函数返回null，则说明当前这个segment没有处于pending的变
+   * 更（这里没有考虑{@link DocumentsWriterDeleteQueue#globalBufferedUpdates}以及
+   * {@link BufferedUpdatesStream#}尚未处理的变更）。换句话说，segment的变更信息可以直接从
+   * {@link SegmentCommitInfo#delCount}或者{@link SegmentCommitInfo#softDelCount}直
+   * 接获取。
+   */
   ReadersAndUpdates getPooledInstance(SegmentCommitInfo info, boolean create) {
     ensureOpen(false);
     return readerPool.get(info, create);
@@ -6185,6 +6272,11 @@ public class IndexWriter
 
           // Must open while holding IW lock so that e.g. segments are not merged
           // away, dropped from 100% deletions, etc., before we can open the readers
+          /**
+           * 这里会open {@link SegmentReader}（即获取当前index的一个snapshot），在释放
+           * IndexWriter同步锁后，可以确保SegmentReader不会读取到新的文件。执行apply更新
+           * 时，仅仅delete操作需要通过SegmentReader来进行文档查询。
+           */
           segStates = openSegmentStates(infos, seenSegments, updates.delGen());
 
           if (segStates.length == 0) {

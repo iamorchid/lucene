@@ -39,11 +39,7 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.index.TermsEnum.SeekStatus;
-import org.apache.lucene.store.ByteArrayDataInput;
-import org.apache.lucene.store.ChecksumIndexInput;
-import org.apache.lucene.store.DataInput;
-import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.RandomAccessInput;
+import org.apache.lucene.store.*;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.LongValues;
@@ -481,7 +477,7 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
     if (entry.docsWithFieldOffset == -2) {
       // empty
       return DocValues.emptyNumeric();
-    } else if (entry.docsWithFieldOffset == -1) {
+    } else if (entry.docsWithFieldOffset == -1) { /* 所有文档都包含改字段 */
       // dense
       if (entry.bitsPerValue == 0) {
         return new DenseNumericDocValues(maxDoc) {
@@ -534,7 +530,7 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
           }
         }
       }
-    } else {
+    } else { /* 不是所有文档都包含改字段 */
       // sparse
       final IndexedDISI disi =
           new IndexedDISI(
@@ -734,14 +730,13 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
   public BinaryDocValues getBinary(FieldInfo field) throws IOException {
     BinaryEntry entry = binaries.get(field.name);
 
-    if (entry.docsWithFieldOffset == -2) {
+    if (entry.docsWithFieldOffset == -2) { /* 没有文档包含改字段 */
       return DocValues.emptyBinary();
     }
 
     final IndexInput bytesSlice = data.slice("fixed-binary", entry.dataOffset, entry.dataLength);
 
-    if (entry.docsWithFieldOffset == -1) {
-      // dense
+    if (entry.docsWithFieldOffset == -1) { /* 所有文档都包含这个字段 */
       if (entry.minLength == entry.maxLength) {
         // fixed length
         final int length = entry.maxLength;
@@ -774,8 +769,7 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
           }
         };
       }
-    } else {
-      // sparse
+    } else { /* 不是所有文档都包含这个字段 */
       final IndexedDISI disi =
           new IndexedDISI(
               data,
@@ -832,6 +826,7 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
     if (ordsEntry.blockShift < 0 // single block
         && ordsEntry.bitsPerValue > 0) { // more than 1 value
 
+      // 这个校验感觉可以直接放在函数体内 ？
       if (ordsEntry.gcd != 1 || ordsEntry.minValue != 0 || ordsEntry.table != null) {
         throw new IllegalStateException("Ordinals shouldn't use GCD, offset or table compression");
       }
@@ -1233,7 +1228,7 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
       term.length = bytes.readVInt();
       bytes.readBytes(term.bytes, 0, term.length);
       long offset = bytes.getFilePointer();
-      if (offset < entry.termsDataLength - 1) {
+      if (offset < entry.termsDataLength - 1) { /* 为啥不是 offset < entry.termsDataLength ？ */
         // Avoid decompress again if we are reading a same block.
         if (currentCompressedBlockStart != offset) {
           blockBuffer.offset = term.length;
@@ -1650,6 +1645,7 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
     }
 
     long getLongValue(long index) throws IOException {
+      // shift用于表示以多少个2^shift的值组成一个block
       final long block = index >>> shift;
       if (this.block != block) {
         int bitsPerValue;
@@ -1657,9 +1653,16 @@ final class Lucene90DocValuesProducer extends DocValuesProducer {
           // If the needed block is the one directly following the current block, it is cheaper to
           // avoid the cache
           if (rankSlice != null && block != this.block + 1) {
+            // rankSlice对应的是指向value blocks的table，其中table的每个long型的entry
+            // 对是一个指向对应block第一个字节的file pointer（或者对应block的前一个block
+            // 的结束位置）。
             blockEndOffset = rankSlice.readLong(block * Long.BYTES) - entry.valuesOffset;
             this.block = block - 1;
           }
+          /**
+           * value block的格式可以参考{@link Lucene90DocValuesConsumer#writeBlock}，即
+           * bitsPerValue,min,valuesBytes,values 或者 0,min
+           */
           offset = blockEndOffset;
           bitsPerValue = slice.readByte(offset++);
           delta = slice.readLong(offset);

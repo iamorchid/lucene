@@ -91,27 +91,27 @@ final class SegmentCoreReaders {
   private final Set<IndexReader.ClosedListener> coreClosedListeners =
       Collections.synchronizedSet(new LinkedHashSet<IndexReader.ClosedListener>());
 
-  SegmentCoreReaders(Directory dir, SegmentCommitInfo si, IOContext context) throws IOException {
+  SegmentCoreReaders(SegmentInfo si, IOContext context) throws IOException {
 
-    final Codec codec = si.info.getCodec();
+    final Codec codec = si.getCodec();
     final Directory
         cfsDir; // confusing name: if (cfs) it's the cfsdir, otherwise it's the segment's directory.
     boolean success = false;
 
     try {
-      if (si.info.getUseCompoundFile()) {
-        cfsDir = cfsReader = codec.compoundFormat().getCompoundReader(dir, si.info, context);
+      if (si.getUseCompoundFile()) {
+        cfsDir = cfsReader = codec.compoundFormat().getCompoundReader(si.dir, si, context);
       } else {
         cfsReader = null;
-        cfsDir = dir;
+        cfsDir = si.dir;
       }
 
-      segment = si.info.name;
+      segment = si.name;
 
-      coreFieldInfos = codec.fieldInfosFormat().read(cfsDir, si.info, "", context);
+      coreFieldInfos = codec.fieldInfosFormat().read(cfsDir, si, "", context);
 
       final SegmentReadState segmentReadState =
-          new SegmentReadState(cfsDir, si.info, coreFieldInfos, context);
+          new SegmentReadState(cfsDir, si, coreFieldInfos, context);
       if (coreFieldInfos.hasPostings()) {
         final PostingsFormat format = codec.postingsFormat();
         // Ask codec for its Fields
@@ -132,17 +132,17 @@ final class SegmentCoreReaders {
       }
 
       fieldsReaderOrig =
-          si.info
+          si
               .getCodec()
               .storedFieldsFormat()
-              .fieldsReader(cfsDir, si.info, coreFieldInfos, context);
+              .fieldsReader(cfsDir, si, coreFieldInfos, context);
 
       if (coreFieldInfos.hasVectors()) { // open term vector files only as needed
         termVectorsReaderOrig =
-            si.info
+            si
                 .getCodec()
                 .termVectorsFormat()
-                .vectorsReader(cfsDir, si.info, coreFieldInfos, context);
+                .vectorsReader(cfsDir, si, coreFieldInfos, context);
       } else {
         termVectorsReaderOrig = null;
       }
@@ -161,7 +161,7 @@ final class SegmentCoreReaders {
 
       success = true;
     } catch (EOFException | FileNotFoundException e) {
-      throw new CorruptIndexException("Problem reading index from " + dir, dir.toString(), e);
+      throw new CorruptIndexException("Problem reading index from " + si.dir, si.dir.toString(), e);
     } catch (NoSuchFileException e) {
       throw new CorruptIndexException("Problem reading index.", e.getFile(), e);
     } finally {

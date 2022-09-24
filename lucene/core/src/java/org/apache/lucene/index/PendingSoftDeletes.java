@@ -52,6 +52,11 @@ final class PendingSoftDeletes extends PendingDeletes {
     // we need to fetch this first it might be a shared instance with
     FixedBitSet mutableBits = getMutableBits();
     // hardDeletes
+    /**
+     * 这个方法是处理硬删除，一个文档被硬删除的live bits中清理后，也必须从软删除
+     * live bits清楚（即硬删除的live bits是软删除的超级）。如果之前这个文档已经
+     * 被软删除，则需要将pending delete统计从软删除调成为硬删除。
+     */
     if (hardDeletes.delete(docID)) {
       if (mutableBits.get(docID)) { // delete it here too!
         mutableBits.clear(docID);
@@ -74,7 +79,9 @@ final class PendingSoftDeletes extends PendingDeletes {
 
   @Override
   void onNewReader(CodecReader reader, SegmentCommitInfo info) throws IOException {
+    // 将硬删除后的文档从软删除的live bits中清理掉
     super.onNewReader(reader, info);
+
     hardDeletes.onNewReader(reader, info);
     // only re-calculate this if we haven't seen this generation
     if (dvGeneration < info.getDocValuesGen()) {
@@ -103,11 +110,14 @@ final class PendingSoftDeletes extends PendingDeletes {
     // when the hard deletes are set since we need to account for docs that used to be only
     // soft-delete but now hard-deleted
     this.info.setSoftDelCount(this.info.getSoftDelCount() + pendingDeleteCount);
+    // 这里是drop软删除的pending delete统计
     super.dropChanges();
+
     // delegate the write to the hard deletes - it will only write if somebody used it.
     if (hardDeletes.writeLiveDocs(dir)) {
       return true;
     }
+
     return false;
   }
 

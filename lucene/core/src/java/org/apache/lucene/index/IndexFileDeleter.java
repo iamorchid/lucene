@@ -264,7 +264,9 @@ final class IndexFileDeleter implements Closeable {
     // 从而导致segmentInfos不可用。
     /**
      * 该操作可以保证即使对应的commits被IndexDeletionPolicy删除时，segmentInfos
-     * 引用的文件仍然可以被IndexWriter可访问，即index仍然可用。
+     * 引用的文件仍然可以被IndexWriter可访问，即index仍然可用。如果后续没有新的
+     * commit引用这些文件（即没有对应的segments_N文件），那么在{@link #close()}
+     * 的时候，这些文件将会被清理。
      */
     checkpoint(segmentInfos, false);
 
@@ -755,6 +757,8 @@ final class IndexFileDeleter implements Closeable {
         infoStream.message("IFD", "delete " + names + "");
       }
     }
+
+//    System.out.println("delete files: " + names);
 
     // We make two passes, first deleting any segments_N files, second deleting the rest.  We do
     // this so that if we throw exc or JVM

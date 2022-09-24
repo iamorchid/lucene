@@ -113,6 +113,14 @@ public class TestDeletes {
         }
 
         {
+            // 这里可以查询到软删除的结果
+            DirectoryReader reader = DirectoryReader.open(dir);
+            search(reader, "case #1.1");
+            System.out.println("------------------");
+            reader.close();
+        }
+
+        {
             IndexWriter indexWriter = new IndexWriter(dir, getWriterConfig(createKeepAllCommitsPolicy()));
 
             indexWriter.updateBinaryDocValue(new Term("docName", "document0"), "sqlCol", new BytesRef("dv0-new2"));
@@ -132,7 +140,9 @@ public class TestDeletes {
             IndexWriter indexWriter = new IndexWriter(dir, getWriterConfig(createDeleteAllCommitsPolicy()));
 
             /**
-             *
+             * 虽然所有的commits此时已经被删除了，但被打开的commit（即latest commit）对应的
+             * {@link SegmentCommitInfo} 还是有效的 （{@link IndexFileDeleter}）会确保
+             * 它引用的文件不被删除。
              */
             System.out.println("all files #2.1: " + Arrays.asList(dir.listAll()));
 
@@ -143,6 +153,7 @@ public class TestDeletes {
             indexWriter.addDocument(doc);
 
             {
+                // 这里仍然可见之前commit的数据
                 DirectoryReader reader = DirectoryReader.open(indexWriter);
                 search(reader, "case #2");
                 reader.close();
@@ -220,7 +231,7 @@ public class TestDeletes {
         System.out.println("start search: " + tip);
         ScoreDoc[] scoreDocs = (new IndexSearcher(reader)).search(new MatchAllDocsQuery(), 100).scoreDocs;
         for (ScoreDoc scoreDoc : scoreDocs) {
-            System.out.println("docId: 文档" + scoreDoc.doc
+            System.out.println("docId: #" + scoreDoc.doc
                     + ", docName: " + reader.document(scoreDoc.doc).get("docName")
                     + ", value: " + reader.document(scoreDoc.doc).get("value"));
         }

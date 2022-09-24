@@ -282,6 +282,7 @@ final class Lucene90DocValuesConsumer extends DocValuesConsumer {
           && uniqueValues.size() > 1
           && DirectWriter.unsignedBitsRequired(uniqueValues.size() - 1)
               < DirectWriter.unsignedBitsRequired((max - min) / gcd)) {
+        // encode后，value的范围将是[0, uniqueValues.size() - 1]
         numBitsPerValue = DirectWriter.unsignedBitsRequired(uniqueValues.size() - 1);
         final Long[] sortedUniqueValues = uniqueValues.toArray(new Long[0]);
         Arrays.sort(sortedUniqueValues);
@@ -296,7 +297,6 @@ final class Lucene90DocValuesConsumer extends DocValuesConsumer {
         min = 0;
         gcd = 1;
       } else {
-        uniqueValues = null;
         // we do blocks if that appears to save 10+% storage
         doBlocks =
             minMax.spaceInBits > 0 && (double) blockMinMax.spaceInBits / minMax.spaceInBits <= 0.9;
@@ -385,7 +385,15 @@ final class Lucene90DocValuesConsumer extends DocValuesConsumer {
     for (int i = 0; i < offsetsIndex; i++) {
       data.writeLong(offsets[i]);
     }
+
+    /**
+     * 为啥需要写这个？对于任意一个block index，方便通过 offsets[index+1] - offsets[index] 计算block的大小。但目前看起来没有用到，
+     * 可以参见{@link org.apache.lucene.codecs.lucene90.Lucene90DocValuesProducer.VaryingBPVReader#getLongValue}。
+     *
+     * 之所以没有用到最后一个offset，是因为在{@link #writeBlock}中，以及记录了block的大小，但实际上这个是不需要的。
+     */
     data.writeLong(offsetsOrigo);
+
     return offsetsOrigo;
   }
 
@@ -473,6 +481,14 @@ final class Lucene90DocValuesConsumer extends DocValuesConsumer {
       final DirectMonotonicWriter writer =
           DirectMonotonicWriter.getInstance(
               meta, data, numDocsWithField + 1, DIRECT_MONOTONIC_BLOCK_SHIFT);
+      /**
+       * 注意，如果这里的doc数量为N，则写入的value address数量为N+1。这样的好处是，对于
+       * 任意一个合法的doc index（即文档在doc values中的序号），可以通过下面的计算公式获
+       * 取binary value的长度。否则，对与最后一个doc index，则需要特殊处理。
+       * addresses[index+1] - addresses[index]
+       *
+       * 参见：{@link Lucene90DocValuesProducer#getBinary}
+       */
       long addr = 0;
       writer.add(addr);
       values = valuesProducer.getBinary(field);

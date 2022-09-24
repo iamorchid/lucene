@@ -172,8 +172,19 @@ final class FrozenBufferedUpdates {
       assert privateSegment == segStates[0].reader.getOriginalSegmentInfo();
     }
 
+    /**
+     * 对segments进行deletes（即hard deletes）并不要求严格按照{@link #delGen}
+     * 进行，因此这里可以看到直接使用{@link ReadersAndUpdates#delete}进行操作，
+     * 而没有按照delGen进行排序。
+     */
     totalDelCount += applyTermDeletes(segStates);
     totalDelCount += applyQueryDeletes(segStates);
+
+    /**
+     * DV更新操作需要严格按照{@link #delGen}进行排序，因此这里可以看到apply进行
+     * 放到{@link ReadersAndUpdates#pendingDVUpdates}中，等到真正要写入文件
+     * 时，再按照delGen进行排序。
+     */
     totalDelCount += applyDocValuesUpdates(segStates);
 
     return totalDelCount;
